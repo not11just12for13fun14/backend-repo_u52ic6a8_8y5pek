@@ -1,0 +1,19 @@
+INFO:     Will watch for changes in these directories: ['/home/workspace']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [240] using StatReload
+INFO:     Started server process [242]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     172.20.0.1:49708 - "HEAD / HTTP/1.1" 405 Method Not Allowed
+INFO:     172.20.0.1:46266 - "OPTIONS /api/session HTTP/1.1" 200 OK
+INFO:     172.20.0.1:46276 - "OPTIONS /api/session HTTP/1.1" 200 OK
+INFO:     172.20.0.1:46276 - "POST /api/session HTTP/1.1" 200 OK
+INFO:     172.20.0.1:46288 - "POST /api/session HTTP/1.1" 200 OK
+INFO:     172.20.0.1:46266 - "POST /api/session HTTP/1.1" 200 OK
+INFO:     172.20.0.1:46276 - "GET /api/session/691ff75642f70880735e207c/next-question HTTP/1.1" 200 OK
+INFO:     172.20.0.1:46276 - "GET /api/session/691ff75642f70880735e207c/next-question HTTP/1.1" 200 OK
+INFO:     172.20.0.1:46296 - "OPTIONS /api/session/691ff75742f70880735e207d/answer HTTP/1.1" 200 OK
+INFO:     172.20.0.1:46300 - "POST /api/session/691ff75742f70880735e207d/answer HTTP/1.1" 200 OK
+INFO:     172.20.0.1:46300 - "GET /api/session/691ff75742f70880735e207d/next-question HTTP/1.1" 200 OK
+INFO:     172.20.0.1:54674 - "POST /api/session/691ff75742f70880735e207d/answer HTTP/1.1" 200 OK
+INFO:     172.20.0.1:54674 - "GET /api/session/691ff75742f70880735e207d/next-question HTTP/1.1" 200 OK

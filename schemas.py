@@ -12,7 +12,8 @@ Model name is converted to lowercase for the collection name:
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List, Literal
+from datetime import datetime
 
 # Example schemas (replace with your own):
 
@@ -27,6 +28,7 @@ class User(BaseModel):
     age: Optional[int] = Field(None, ge=0, le=120, description="Age in years")
     is_active: bool = Field(True, description="Whether user is active")
 
+
 class Product(BaseModel):
     """
     Products collection schema
@@ -38,8 +40,37 @@ class Product(BaseModel):
     category: str = Field(..., description="Product category")
     in_stock: bool = Field(True, description="Whether product is in stock")
 
-# Add your own schemas here:
-# --------------------------------------------------
+
+# Thinking Assistant Schemas
+Category = Literal["business", "content", "general"]
+
+
+class Session(BaseModel):
+    category: Category
+    name: Optional[str] = None
+    goal: Optional[str] = None
+    step: int = 0
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class Message(BaseModel):
+    session_id: str
+    step: int
+    question: str
+    answer: str
+    created_at: Optional[datetime] = None
+
+
+class Idea(BaseModel):
+    session_id: str
+    title: str
+    summary: str
+    steps: List[str]
+    tags: List[str]
+    category: Category
+    created_at: Optional[datetime] = None
+
 
 # Note: The Flames database viewer will automatically:
 # 1. Read these schemas from GET /schema endpoint

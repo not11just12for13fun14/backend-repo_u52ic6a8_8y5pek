@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Literal
 from datetime import datetime
 
-# Example schemas (replace with your own):
+# Example schemas (keep for reference)
 
 class User(BaseModel):
     """
@@ -43,6 +43,15 @@ class Product(BaseModel):
 
 # Thinking Assistant Schemas
 Category = Literal["business", "content", "general"]
+Plan = Literal["free", "pro"]
+
+
+class Account(BaseModel):
+    """Represents an anonymous account keyed by client_id with a plan."""
+    client_id: str
+    plan: Plan = "free"
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
 
 class Session(BaseModel):
@@ -50,6 +59,8 @@ class Session(BaseModel):
     name: Optional[str] = None
     goal: Optional[str] = None
     step: int = 0
+    client_id: str
+    plan: Plan = "free"
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

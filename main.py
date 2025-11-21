@@ -3,10 +3,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal, Dict, Any
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from database import create_document, get_documents, db
-from schemas import Session, Message, Idea
+from schemas import Session, Message, Idea, Account
 
 app = FastAPI(title="Thinking Assistant API")
 
@@ -66,12 +66,22 @@ def test_database():
 
 # ---------- Thinking Assistant Logic ----------
 Category = Literal["business", "content", "general"]
+Plan = Literal["free", "pro"]
+
+
+class InitAccountPayload(BaseModel):
+    client_id: str = Field(..., min_length=6)
+
+
+class UpgradePayload(BaseModel):
+    client_id: str = Field(..., min_length=6)
 
 
 class StartSessionPayload(BaseModel):
     category: Category = Field(..., description="Type of brainstorming")
     name: Optional[str] = Field(None, description="Optional user name or alias")
     goal: Optional[str] = Field(None, description="One-line goal or theme for this session")
+    client_id: str = Field(..., description="Anonymous client identifier")
 
 
 class AnswerPayload(BaseModel):
@@ -103,6 +113,10 @@ QUESTION_BANK: Dict[Category, List[str]] = {
 }
 
 
+def account_collection_name() -> str:
+    return Account.__name__.lower()
+
+
 def session_collection_name() -> str:
     return Session.__name__.lower()
 
@@ -115,10 +129,65 @@ def idea_collection_name() -> str:
     return Idea.__name__.lower()
 
 
+# ---- Account/Plan Endpoints ----
+@app.post("/api/account/init")
+def init_account(payload: InitAccountPayload):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+
+    col = db[account_collection_name()]
+    existing = col.find_one({"client_id": payload.client_id})
+    if existing:
+        return {"client_id": existing.get("client_id"), "plan": existing.get("plan", "free")}
+
+    acc = Account(client_id=payload.client_id, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+    create_document(account_collection_name(), acc)
+    return {"client_id": payload.client_id, "plan": "free"}
+
+
+@app.post("/api/account/upgrade")
+def upgrade_account(payload: UpgradePayload):
+    # MVP: mock upgrade by setting plan to pro
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    result = db[account_collection_name()].update_one(
+        {"client_id": payload.client_id}, {"$set": {"plan": "pro", "updated_at": datetime.now(timezone.utc)}}
+    )
+    if result.matched_count == 0:
+        # create if not exists
+        acc = Account(client_id=payload.client_id, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc), plan="pro")
+        create_document(account_collection_name(), acc)
+    return {"client_id": payload.client_id, "plan": "pro"}
+
+
+# ---- Session Endpoints ----
 @app.post("/api/session")
 def start_session(payload: StartSessionPayload):
     category = payload.category
     questions = QUESTION_BANK[category]
+
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+
+    # Ensure account exists
+    acc_col = db[account_collection_name()]
+    account = acc_col.find_one({"client_id": payload.client_id})
+    if not account:
+        acc = Account(client_id=payload.client_id, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        create_document(account_collection_name(), acc)
+        account = acc_col.find_one({"client_id": payload.client_id})
+
+    plan: Plan = account.get("plan", "free")
+
+    # Enforce free plan limit: 1 session per day (UTC)
+    if plan == "free":
+        start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_count = db[session_collection_name()].count_documents({
+            "client_id": payload.client_id,
+            "created_at": {"$gte": start_of_day}
+        })
+        if today_count >= 1:
+            raise HTTPException(status_code=402, detail="Daily limit reached. Upgrade to Pro for unlimited brainstorming.")
 
     # Create a new session document
     session_doc = Session(
@@ -126,6 +195,8 @@ def start_session(payload: StartSessionPayload):
         name=payload.name,
         goal=payload.goal,
         step=0,
+        client_id=payload.client_id,
+        plan=plan,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
@@ -136,6 +207,7 @@ def start_session(payload: StartSessionPayload):
         "question": questions[0],
         "step": 0,
         "total_steps": len(questions),
+        "plan": plan,
     }
 
 

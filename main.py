@@ -1,9 +1,11 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal, Dict, Any
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
+
+import stripe
 
 from database import create_document, get_documents, db
 from schemas import Session, Message, Idea, Account
@@ -17,6 +19,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Configure Stripe
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_PRICE_MONTHLY = os.getenv("STRIPE_PRICE_MONTHLY", "")
+STRIPE_PRICE_YEARLY = os.getenv("STRIPE_PRICE_YEARLY", "")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_SUCCESS_URL = os.getenv("STRIPE_SUCCESS_URL", "http://localhost:3000?status=success")
+STRIPE_CANCEL_URL = os.getenv("STRIPE_CANCEL_URL", "http://localhost:3000?status=cancel")
+
+if STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
 
 
 @app.get("/")
@@ -71,6 +84,7 @@ Plan = Literal["free", "pro"]
 
 class InitAccountPayload(BaseModel):
     client_id: str = Field(..., min_length=6)
+    email: Optional[str] = None
 
 
 class UpgradePayload(BaseModel):
@@ -86,6 +100,17 @@ class StartSessionPayload(BaseModel):
 
 class AnswerPayload(BaseModel):
     answer: str = Field(..., min_length=1)
+
+
+class CreateCheckoutPayload(BaseModel):
+    client_id: str
+    price_id: Optional[str] = None
+    interval: Optional[str] = Field(None, description="monthly or yearly")
+    email: Optional[str] = None
+
+
+class BillingPortalPayload(BaseModel):
+    client_id: str
 
 
 QUESTION_BANK: Dict[Category, List[str]] = {
@@ -137,17 +162,23 @@ def init_account(payload: InitAccountPayload):
 
     col = db[account_collection_name()]
     existing = col.find_one({"client_id": payload.client_id})
+    now = datetime.now(timezone.utc)
     if existing:
+        update: Dict[str, Any] = {"updated_at": now}
+        if payload.email and not existing.get("email"):
+            update["email"] = payload.email
+        if update:
+            col.update_one({"client_id": payload.client_id}, {"$set": update})
         return {"client_id": existing.get("client_id"), "plan": existing.get("plan", "free")}
 
-    acc = Account(client_id=payload.client_id, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+    acc = Account(client_id=payload.client_id, created_at=now, updated_at=now, email=payload.email)
     create_document(account_collection_name(), acc)
     return {"client_id": payload.client_id, "plan": "free"}
 
 
 @app.post("/api/account/upgrade")
 def upgrade_account(payload: UpgradePayload):
-    # MVP: mock upgrade by setting plan to pro
+    # Legacy mock upgrade for demo
     if db is None:
         raise HTTPException(status_code=500, detail="Database not configured")
     result = db[account_collection_name()].update_one(
@@ -158,6 +189,141 @@ def upgrade_account(payload: UpgradePayload):
         acc = Account(client_id=payload.client_id, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc), plan="pro")
         create_document(account_collection_name(), acc)
     return {"client_id": payload.client_id, "plan": "pro"}
+
+
+# ---- Billing (Stripe) ----
+@app.post("/api/billing/checkout")
+def create_checkout_session(payload: CreateCheckoutPayload):
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+
+    col = db[account_collection_name()]
+    acct = col.find_one({"client_id": payload.client_id})
+    now = datetime.now(timezone.utc)
+    if not acct:
+        acc = Account(client_id=payload.client_id, created_at=now, updated_at=now, email=payload.email)
+        create_document(account_collection_name(), acc)
+        acct = col.find_one({"client_id": payload.client_id})
+
+    # Ensure customer exists
+    customer_id = acct.get("stripe_customer_id")
+    email = payload.email or acct.get("email")
+    if not customer_id:
+        customer = stripe.Customer.create(email=email, metadata={"client_id": payload.client_id})
+        customer_id = customer["id"]
+        col.update_one({"client_id": payload.client_id}, {"$set": {"stripe_customer_id": customer_id, "email": email, "updated_at": now}})
+
+    # Determine price
+    price = payload.price_id
+    if not price:
+        if payload.interval == "yearly" and STRIPE_PRICE_YEARLY:
+            price = STRIPE_PRICE_YEARLY
+        else:
+            price = STRIPE_PRICE_MONTHLY or STRIPE_PRICE_YEARLY
+    if not price:
+        raise HTTPException(status_code=500, detail="No Stripe price configured")
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            customer=customer_id,
+            line_items=[{"price": price, "quantity": 1}],
+            success_url=STRIPE_SUCCESS_URL + "&session_id={CHECKOUT_SESSION_ID}",
+            cancel_url=STRIPE_CANCEL_URL,
+            allow_promotion_codes=True,
+            client_reference_id=payload.client_id,
+            metadata={"client_id": payload.client_id},
+        )
+        return {"checkout_url": session.url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Stripe error: {str(e)}")
+
+
+@app.post("/api/billing/portal")
+def create_billing_portal(payload: BillingPortalPayload):
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+
+    col = db[account_collection_name()]
+    acct = col.find_one({"client_id": payload.client_id})
+    if not acct or not acct.get("stripe_customer_id"):
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    try:
+        portal = stripe.billing_portal.Session.create(
+            customer=acct["stripe_customer_id"],
+            return_url=STRIPE_SUCCESS_URL,
+        )
+        return {"portal_url": portal.url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Stripe error: {str(e)}")
+
+
+@app.post("/api/stripe/webhook")
+async def stripe_webhook(request: Request):
+    if not STRIPE_WEBHOOK_SECRET:
+        # For safety, reject if not configured
+        raise HTTPException(status_code=500, detail="Stripe webhook not configured")
+
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    try:
+        event = stripe.Webhook.construct_event(
+            payload=payload, sig_header=sig_header, secret=STRIPE_WEBHOOK_SECRET
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Webhook error: {str(e)}")
+
+    type_ = event.get("type")
+    data = event.get("data", {}).get("object", {})
+
+    def set_plan(client_id: str, plan: str, fields: Dict[str, Any]):
+        if db is None:
+            return
+        now = datetime.now(timezone.utc)
+        update = {"plan": plan, "updated_at": now}
+        update.update(fields)
+        db[account_collection_name()].update_one({"client_id": client_id}, {"$set": update}, upsert=True)
+
+    try:
+        if type_ == "checkout.session.completed":
+            client_id = data.get("client_reference_id") or (data.get("metadata") or {}).get("client_id")
+            sub_id = data.get("subscription")
+            cust_id = data.get("customer")
+            status = "active"
+            if client_id:
+                set_plan(client_id, "pro", {"stripe_subscription_id": sub_id, "stripe_customer_id": cust_id, "subscription_status": status})
+        elif type_ in ("customer.subscription.created", "customer.subscription.updated"):
+            sub_id = data.get("id")
+            cust_id = data.get("customer")
+            status = data.get("status")
+            # Find account by subscription or customer
+            if db is not None:
+                col = db[account_collection_name()]
+                acct = col.find_one({"$or": [
+                    {"stripe_subscription_id": sub_id},
+                    {"stripe_customer_id": cust_id}
+                ]})
+                if acct:
+                    set_plan(acct["client_id"], "pro" if status in ("active", "trialing") else "free",
+                             {"stripe_subscription_id": sub_id, "stripe_customer_id": cust_id, "subscription_status": status})
+        elif type_ == "customer.subscription.deleted":
+            sub_id = data.get("id")
+            status = data.get("status")
+            if db is not None:
+                col = db[account_collection_name()]
+                acct = col.find_one({"stripe_subscription_id": sub_id})
+                if acct:
+                    set_plan(acct["client_id"], "free", {"subscription_status": status})
+    except Exception:
+        # Swallow errors to avoid retries storm in dev
+        pass
+
+    return {"received": True}
 
 
 # ---- Session Endpoints ----

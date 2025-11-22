@@ -50,6 +50,10 @@ class Account(BaseModel):
     """Represents an anonymous account keyed by client_id with a plan."""
     client_id: str
     plan: Plan = "free"
+    email: Optional[str] = None
+    stripe_customer_id: Optional[str] = None
+    stripe_subscription_id: Optional[str] = None
+    subscription_status: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
